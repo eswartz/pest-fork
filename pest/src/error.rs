@@ -39,6 +39,21 @@ pub struct Error<R> {
     inner: Box<ErrorInner<R>>,
 }
 
+impl<R> Error<R> {
+    /// Bump the `Error` by the given `line_offset` and `byte_offset`.
+    ///
+    /// This can be used to adjust errors when parsing incrementally,
+    /// so errors and source will be reported at the expected location.
+    pub fn offset_by(self, line_offset: isize, byte_offset: isize) -> Self {
+        Self {
+            variant: self.variant,
+            location: self.location.offset_by(byte_offset),
+            line_col: self.line_col.offset_by(line_offset),
+            inner: self.inner,
+        }
+    }
+}
+
 /// Private information for parse errors.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ErrorInner<R> {
@@ -78,6 +93,21 @@ pub enum InputLocation {
     Span((usize, usize)),
 }
 
+impl InputLocation {
+    /// Bump the `InputLocation` by the given `byte_offset`.
+    ///
+    /// This will panic on overflow or underflow.
+    pub fn offset_by(self, byte_offset: isize) -> Self {
+        match self {
+            InputLocation::Pos(pos) => InputLocation::Pos(pos.strict_add_signed(byte_offset)),
+            InputLocation::Span((from, to)) => InputLocation::Span((
+                from.strict_add_signed(byte_offset),
+                to.strict_add_signed(byte_offset),
+            )),
+        }
+    }
+}
+
 /// Line/column where an `Error` has occurred.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum LineColLocation {
@@ -85,6 +115,23 @@ pub enum LineColLocation {
     Pos((usize, usize)),
     /// Line/column pairs if `Error` was created by `Error::new_from_span`
     Span((usize, usize), (usize, usize)),
+}
+
+impl LineColLocation {
+    /// Bump the `LineColLocation` by the given `line_offset`.
+    pub fn offset_by(self, line_offset: isize) -> Self {
+        match self {
+            LineColLocation::Pos((line, col)) => {
+                LineColLocation::Pos((line.strict_add_signed(line_offset), col))
+            }
+            LineColLocation::Span((from_line, from_col), (to_line, to_col)) => {
+                LineColLocation::Span(
+                    (from_line.strict_add_signed(line_offset), from_col),
+                    (to_line.strict_add_signed(line_offset), to_col),
+                )
+            }
+        }
+    }
 }
 
 impl From<Position<'_>> for LineColLocation {
@@ -1218,5 +1265,64 @@ mod tests {
         } else {
             std::env::remove_var("FORCE_COLOR");
         }
+    }
+
+    #[test]
+    fn display_parsing_error_offset_by_with_pos() {
+        const OFFSET: usize = 4;
+        let input = "old\nab\nuh cd\nef";
+        let pos = Position::new(&input[OFFSET..], 4).unwrap();
+        let error: Error<u32> = Error::new_from_pos(
+            ErrorVariant::ParsingError {
+                positives: vec![1, 2, 3],
+                negatives: vec![4, 5, 6],
+            },
+            pos,
+        );
+
+        let error = error.offset_by(10, 1000 /* unused here */);
+
+        assert_eq!(
+            format!("{error}"),
+            [
+                "  --> 12:2",
+                "   |",
+                "12 | uh cd",
+                "   |  ^---",
+                "   |",
+                "   = unexpected 4, 5, or 6; expected 1, 2, or 3"
+            ]
+            .join("\n")
+        );
+    }
+
+    #[test]
+    fn display_parsing_error_offset_by_with_span() {
+        const OFFSET: usize = 16; // 15 '?' then newline
+        let input = "????????????????\nab\nuh cd\nef";
+        let span = Span::new(&input[OFFSET..], 7, 9).unwrap();
+
+        let error: Error<u32> = Error::new_from_span(
+            ErrorVariant::ParsingError {
+                positives: vec![1, 2, 3],
+                negatives: vec![4, 5, 6],
+            },
+            span,
+        );
+
+        let error = error.offset_by(10, OFFSET as isize);
+
+        assert_eq!(
+            format!("{error}"),
+            [
+                "  --> 13:4",
+                "   |",
+                "13 | uh cd",
+                "   |    ^^",
+                "   |",
+                "   = unexpected 4, 5, or 6; expected 1, 2, or 3"
+            ]
+            .join("\n")
+        );
     }
 }
