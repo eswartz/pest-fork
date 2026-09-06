@@ -39,6 +39,30 @@ pub struct Error<R> {
     inner: Box<ErrorInner<R>>,
 }
 
+impl<R> Error<R> {
+    /// Bump the `Error`'s reported line and column by adjusting
+    /// the given offsets.
+    ///
+    /// Unless the column changes, the byte_offset and line_col_offset.0
+    /// can be zero.
+    ///
+    /// This can be used to adjust errors when parsing incrementally,
+    /// so errors and source will be reported at the expected location.
+    pub fn add_offset_line_col(
+        self,
+        byte_offset: isize,
+        line_col_offset: (isize, isize),
+    ) -> Error<R> {
+        let inner = *self.inner;
+        Error {
+            variant: self.variant,
+            location: self.location.offset_by(byte_offset),
+            line_col: self.line_col.offset_by(line_col_offset),
+            inner: Box::new(inner.offset_by(line_col_offset.1)),
+        }
+    }
+}
+
 /// Private information for parse errors.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ErrorInner<R> {
@@ -46,6 +70,18 @@ struct ErrorInner<R> {
     line: String,
     continued_line: Option<String>,
     parse_attempts: Option<ParseAttempts<R>>,
+}
+impl<R> ErrorInner<R> {
+    fn offset_by(self, col_offset: isize) -> ErrorInner<R> {
+        let outdent = col_offset.min(0).abs() as usize;
+        let indent = col_offset.max(0) as usize;
+        ErrorInner::<R> {
+            line: format!("{:indent$}{}", "", &self.line[outdent..], indent = indent),
+            path: self.path,
+            continued_line: self.continued_line,
+            parse_attempts: self.parse_attempts,
+        }
+    }
 }
 
 impl<R: RuleType> core::error::Error for Error<R> {}
@@ -78,6 +114,21 @@ pub enum InputLocation {
     Span((usize, usize)),
 }
 
+impl InputLocation {
+    /// Bump the `InputLocation` by the given `byte_offset`.
+    ///
+    /// This will panic on overflow or underflow.
+    pub fn offset_by(self, byte_offset: isize) -> Self {
+        match self {
+            InputLocation::Pos(pos) => InputLocation::Pos(pos.strict_add_signed(byte_offset)),
+            InputLocation::Span((from, to)) => InputLocation::Span((
+                from.strict_add_signed(byte_offset),
+                to.strict_add_signed(byte_offset),
+            )),
+        }
+    }
+}
+
 /// Line/column where an `Error` has occurred.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum LineColLocation {
@@ -85,6 +136,31 @@ pub enum LineColLocation {
     Pos((usize, usize)),
     /// Line/column pairs if `Error` was created by `Error::new_from_span`
     Span((usize, usize), (usize, usize)),
+}
+
+impl LineColLocation {
+    /// Bump the `LineColLocation` by the given `line_offset`.
+    pub fn offset_by(self, line_col_offset: (isize, isize)) -> Self {
+        let (line_offset, col_offset) = line_col_offset;
+        match self {
+            LineColLocation::Pos((line, col)) => LineColLocation::Pos((
+                line.strict_add_signed(line_offset),
+                col.strict_add_signed(col_offset),
+            )),
+            LineColLocation::Span((from_line, from_col), (to_line, to_col)) => {
+                LineColLocation::Span(
+                    (
+                        from_line.strict_add_signed(line_offset),
+                        from_col.strict_add_signed(col_offset),
+                    ),
+                    (
+                        to_line.strict_add_signed(line_offset),
+                        to_col.strict_add_signed(col_offset),
+                    ),
+                )
+            }
+        }
+    }
 }
 
 impl From<Position<'_>> for LineColLocation {
@@ -508,10 +584,19 @@ impl<R: RuleType> Error<R> {
         Some(error)
     }
 
-    fn start(&self) -> (usize, usize) {
+    /// Get the first line and column of the error.
+    pub fn start(&self) -> (usize, usize) {
         match self.line_col {
             LineColLocation::Pos(line_col) => line_col,
             LineColLocation::Span(start_line_col, _) => start_line_col,
+        }
+    }
+
+    /// Get the last line and column of the error (inclusive).
+    pub fn end(&self) -> (usize, usize) {
+        match self.line_col {
+            LineColLocation::Pos(line_col) => line_col,
+            LineColLocation::Span(_, end_line_col) => end_line_col,
         }
     }
 
@@ -1247,5 +1332,65 @@ mod tests {
         } else {
             std::env::remove_var("FORCE_COLOR");
         }
+    }
+
+    #[test]
+    fn display_parsing_error_offset_by() {
+        // Point at 'c'
+        let input = "uh cd\n";
+        let pos = Position::new(&input, 3).unwrap();
+
+        let error: Error<u32> = Error::new_from_pos(
+            ErrorVariant::CustomError {
+                message: "look".to_string(),
+            },
+            pos,
+        );
+
+        // Bump so only the line number changes.
+        let error = error.add_offset_line_col(0, (11, 0));
+
+        assert_eq!(
+            format!("{error}"),
+            [
+                "  --> 12:4",
+                "   |",
+                "12 | uh cd",
+                "   |    ^---",
+                "   |",
+                "   = look"
+            ]
+            .join("\n")
+        );
+
+        // Pretend this text is parsed in a line-number-oriented
+        // parser, which wants to report parse errors with
+        // column 1 considered the first token after the line.
+        let input = "0001 cd\n";
+        // Within that, look at 'cd'
+        let span = Span::new(input, 5, 7).unwrap();
+
+        let error: Error<u32> = Error::new_from_span(
+            ErrorVariant::CustomError {
+                message: "look".to_owned(),
+            },
+            span,
+        );
+
+        // Skip the line number (5 chars & bytes)
+        let error = error.add_offset_line_col(0, (0, -5));
+
+        assert_eq!(
+            format!("{error}"),
+            [
+                " --> 1:1",
+                "  |",
+                "1 | cd",
+                "  | ^^",
+                "  |",
+                "  = look"
+            ]
+            .join("\n")
+        );
     }
 }
