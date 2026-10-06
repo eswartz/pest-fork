@@ -39,15 +39,26 @@ type ListenerFn =
 pub struct Vm {
     rules: HashMap<String, OptimizedRule>,
     listener: Option<ListenerFn>,
+    has_whitespace: bool,
+    has_comment: bool,
 }
 
 impl Vm {
     /// Creates a new `Vm` from optimized rules
     pub fn new(rules: Vec<OptimizedRule>) -> Vm {
-        let rules = rules.into_iter().map(|r| (r.name.clone(), r)).collect();
+        let rules = rules
+            .into_iter()
+            .map(|r| (r.name.clone(), r))
+            .collect::<HashMap<String, OptimizedRule>>();
+
+        let has_whitespace = rules.contains_key("WHITESPACE");
+        let has_comment = rules.contains_key("COMMENT");
+
         Vm {
             rules,
             listener: None,
+            has_whitespace,
+            has_comment,
         }
     }
 
@@ -55,10 +66,19 @@ impl Vm {
     /// and a listener function that is called when a rule is matched.
     /// (used by the `pest_debugger` crate)
     pub fn new_with_listener(rules: Vec<OptimizedRule>, listener: ListenerFn) -> Vm {
-        let rules = rules.into_iter().map(|r| (r.name.clone(), r)).collect();
+        let rules = rules
+            .into_iter()
+            .map(|r| (r.name.clone(), r))
+            .collect::<HashMap<String, OptimizedRule>>();
+
+        let has_whitespace = rules.contains_key("WHITESPACE");
+        let has_comment = rules.contains_key("COMMENT");
+
         Vm {
             rules,
             listener: Some(listener),
+            has_whitespace,
+            has_comment,
         }
     }
 
@@ -260,10 +280,7 @@ impl Vm {
         &'a self,
         state: Box<ParserState<'a, &'a str>>,
     ) -> ParseResult<Box<ParserState<'a, &'a str>>> {
-        match (
-            self.rules.contains_key("WHITESPACE"),
-            self.rules.contains_key("COMMENT"),
-        ) {
+        match (self.has_whitespace, self.has_comment) {
             (false, false) => Ok(state),
             (true, false) => {
                 if state.atomicity() == Atomicity::NonAtomic {
