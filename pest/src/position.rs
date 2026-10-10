@@ -403,7 +403,7 @@ impl<'i> Position<'i> {
     /// otherwise. If no match was made, `pos` will not be updated.
     #[inline]
     pub(crate) fn match_string(&mut self, string: &str) -> bool {
-        let to = self.pos + string.len();
+        let to = self.pos.wrapping_add(string.len());
 
         if Some(string.as_bytes()) == self.input.as_bytes().get(self.pos..to) {
             self.pos = to;
