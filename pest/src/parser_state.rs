@@ -146,9 +146,9 @@ const REQUIRED_STACK_SPACE: usize = 64 * 1024;
 
 #[inline]
 fn remaining_stack() -> Option<usize> {
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", not(miri)))]
     return stacker::remaining_stack();
-    #[cfg(not(feature = "std"))]
+    #[cfg(any(not(feature = "std"), miri))]
     return None;
 }
 
